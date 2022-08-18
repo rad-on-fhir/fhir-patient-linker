@@ -1,21 +1,21 @@
 package net.radonfhir.connector.linker;
 
+import ca.uhn.fhir.rest.api.MethodOutcome;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.gclient.IQuery;
 import net.radonfhir.connector.base.organization.OrganizationService;
 import net.radonfhir.connector.base.patient.PatientHelper;
 import net.radonfhir.connector.base.subscription.PatientEventHandler;
 import net.radonfhir.connector.linker.similarity.PatientSimilarity;
-import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.instance.model.api.IIdType;
 import org.hl7.fhir.r4.model.*;
-import org.hl7.fhir.r4.model.Enumeration;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class LinkerPatientHandlerService implements PatientEventHandler {
@@ -37,15 +37,16 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
             // Load Central Patient:
             boolean linked = false;
             {
-                ArrayList<Patient> centralPatients = linkedCentralPatient(client, patient);
+                List<Patient> centralPatients = linkedCentralPatient(client, patient);
                 for (Patient centralPatient : centralPatients) {
                     linked = this.checkLink(client, centralPatient, patient, changedPatients) | linked;
                 }
+                this.logger.info("Checking Linked done with " + (linked?"LINKED":"not-Linked"));
             }
 
             if (!linked) {
                 // Similar Patients:
-                ArrayList<Patient> similars = searchSimilars(client, patient);
+                List<Patient> similars = searchSimilars(client, patient);
                 this.logger.info("Found Similar Patients to " + PatientHelper.getNameIdStr(patient));
                 for (Patient centralPatient : similars) {
                     linked = this.checkLink(client, centralPatient, patient, changedPatients) | linked;
@@ -58,14 +59,28 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
             }
 
             if (changedPatients.size()>0) {
-                List<IBaseResource> res = client.transaction().withResources(new ArrayList<>(changedPatients)).execute();
+                List<MethodOutcome> outcomes = new ArrayList<>();
+                for (Patient changedPatient : changedPatients) {
+                    IdType idElement = changedPatient.getIdElement();
+                    if (idElement == null || idElement.getId() == null) {
+                        outcomes.add(client.create().resource(changedPatient).execute());
+                    } else {
+                        outcomes.add(client.update().resource(changedPatient).execute());
+                    }
+                }
+                for (MethodOutcome outcome : outcomes) {
+                    this.logger.info("Outcome is " + outcome.getOperationOutcome());
+                }
+                /*List<IBaseResource> res = client.transaction().withResources(new ArrayList<>(changedPatients)).execute();
                 for (IBaseResource re : res) {
                     this.logger.info("Result Resource " + re.getIdElement().getResourceType() + " as " + re.getIdElement().getValue());
-                }
+                }*/
+            } else {
+                this.logger.info("Nothing Changed for Patient " + patient.getId() + " / " + patient.getManagingOrganization());
             }
         } else {
             // TODO: if Central Patient CREATED: add Identifier for Central System with FHIR ID as Value
-            this.logger.info("Ignoring Event for Patient " + patient.getId() + " / " + patient.getManagingOrganization());
+            this.logger.info("Ignoring Event for Patient " + PatientHelper.getNameIdStr(patient));
         }
     }
 
@@ -74,13 +89,16 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
         central.setId((IIdType) null);
         central.getLink().add(createLinkTo(patient));
         changedPatients.add(central);
+        central.getIdentifier().clear();
+        central.setManagingOrganization(OrganizationService.createReference(organizationService.getCentralOrganization()));
         this.logger.error("Added Central Patient '"+PatientHelper.getNameIdStr(central)+"' for Remote: " + PatientHelper.getNameIdStr(patient));
     }
 
     private boolean checkLink(IGenericClient client, Patient centralPatient, Patient patient, Set<Patient> changedPatients) {
         this.logger.error("checkLink Central Patient "+ PatientHelper.getNameIdStr(centralPatient) + "  and " + PatientHelper.getNameIdStr(patient));
         try {
-            float similarity = patientSimilarity.similarity(centralPatient, patient).get();
+            float similarity = patientSimilarity.similarity(centralPatient, patient).get(10, TimeUnit.SECONDS);
+            this.logger.info("checkLink Similarity is " + similarity);
             boolean isLinked = arePatientLinked(centralPatient, patient);
             if (similarity >= this.threshold && !isLinked) {
                 // Add Link
@@ -138,16 +156,9 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
         return false;
     }
 
-    private ArrayList<Patient> searchSimilars(IGenericClient client, Patient patient) {
+    private List<Patient> searchSimilars(IGenericClient client, final Patient patient) {
         List<String> names = new ArrayList<>();
-        HumanName use = null;
-        for (HumanName humanName : patient.getName()) {
-            if (humanName.hasUse() && humanName.getUse().equals(HumanName.NameUse.USUAL)) {
-                use = humanName;
-            } else if (use == null && (!humanName.hasUse() || humanName.getUse().equals(HumanName.NameUse.OFFICIAL))) {
-                use = humanName;
-            }
-        }
+        HumanName use = PatientHelper.getMainHumanName(patient);
         if (use == null) return new ArrayList<>();
         use.getGiven().forEach(stringType -> names.add(stringType.getValue()));
         names.add(use.getFamily());
@@ -157,10 +168,12 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
                 .returnBundle(Bundle.class)
                 .count(1000);
         Bundle bundle = query.execute();
-        return bundleToPatientList(bundle);
+        return PatientHelper.bundleToPatientList(bundle)
+                .stream().filter(patient1 -> !PatientHelper.getIdAsString(patient1).equals(PatientHelper.getIdAsString(patient)))
+                .toList();
     }
 
-    private static ArrayList<Patient> linkedCentralPatient(IGenericClient client, Patient patient) {
+    private static List<Patient> linkedCentralPatient(IGenericClient client, Patient patient) {
         IdType idElement = patient.getIdElement();
         String id = idElement.getId();
         if (id == null) {
@@ -171,21 +184,7 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
                 .returnBundle(Bundle.class)
                 .count(1000);
         Bundle bundle = query.execute();
-        return bundleToPatientList(bundle);
-    }
-
-    @NotNull
-    private static ArrayList<Patient> bundleToPatientList(Bundle bundle) {
-        ArrayList<Patient> list = new ArrayList<>();
-        if (!bundle.isEmpty()) {
-            for (Bundle.BundleEntryComponent bundleEntryComponent : bundle.getEntry()) {
-                Resource resource = bundleEntryComponent.getResource();
-                if (resource instanceof Patient) {
-                    list.add((Patient) resource);
-                }
-            }
-        }
-        return list;
+        return PatientHelper.bundleToPatientList(bundle);
     }
 
     protected List<Patient> loadPatientFromLinks(IGenericClient client, List<Patient.PatientLinkComponent> link) {
