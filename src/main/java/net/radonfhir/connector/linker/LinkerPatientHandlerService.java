@@ -1,5 +1,6 @@
 package net.radonfhir.connector.linker;
 
+import ca.uhn.fhir.rest.api.CacheControlDirective;
 import ca.uhn.fhir.rest.api.MethodOutcome;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.gclient.IQuery;
@@ -182,6 +183,7 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
                 .where(Patient.NAME.contains().values(names))
                 .and(Patient.BIRTHDATE.exactly().day(patient.getBirthDate()))
                 .returnBundle(Bundle.class)
+                .cacheControl(CacheControlDirective.noCache())
                 .count(1000);
         Bundle bundle = query.execute();
         List<Patient> foundList = PatientHelper.bundleToPatientList(bundle);
@@ -201,6 +203,7 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
         IQuery<Bundle> query = client.search().forResource(Patient.class)
                 .where(Patient.LINK.hasId(id))
                 .returnBundle(Bundle.class)
+                .cacheControl(CacheControlDirective.noCache())
                 .count(1000);
         Bundle bundle = query.execute();
         return PatientHelper.bundleToPatientList(bundle);
