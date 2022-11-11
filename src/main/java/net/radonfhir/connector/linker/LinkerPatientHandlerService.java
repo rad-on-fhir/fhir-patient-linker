@@ -214,7 +214,7 @@ public class LinkerPatientHandlerService implements PatientEventHandler {
         if (link != null) {
             for (Patient.PatientLinkComponent linkComponent : link) {
                 String otherId = linkComponent.getOther().getId();
-                Patient otherPatient = client.read().resource(Patient.class).withId(otherId).execute();
+                Patient otherPatient = client.read().resource(Patient.class).withId(otherId).cacheControl(CacheControlDirective.noCache()).execute();
                 if (otherPatient != null) {
                     Optional<Organization> organization = OrganizationService.loadFromReference(client, otherPatient.getManagingOrganization());
                     organization.ifPresent(otherPatient::setManagingOrganizationTarget);
