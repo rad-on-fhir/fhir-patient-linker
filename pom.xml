@@ -6,7 +6,7 @@
 	<parent>
 		<groupId>net.rad-on-fhir</groupId>
 		<artifactId>fhir-connector-base</artifactId>
-		<version>0.0.1-SNAPSHOT</version>
+		<version>2023.6.001-SNAPSHOT</version>
 	</parent>
 	<artifactId>fhir-patient-linker</artifactId>
 
